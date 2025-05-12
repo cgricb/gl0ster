@@ -1,0 +1,60 @@
+#!/bin/bash
+
+DATEDIR=$(date +%d%m%Y_%H%M%S)
+SHOST=$(hostname -s)
+SAVEDIR="/root/observer.$SHOST.$DATEDIR"
+PGUSER=postgres
+PGDB="postgres"
+FORHOWLONGSECS=3600
+
+mkdir -p "$SAVEDIR"
+
+echo "Setting up commit probe table..."
+su - $PGUSER -c "psql -d $PGDB -Atc 'CREATE TABLE IF NOT EXISTS commitprobe(id bigint);'"
+
+cat <<'EOF' > /tmp/commitprobe_sync.pgb
+INSERT INTO commitprobe VALUES ('1');
+EOF
+
+echo "Running pgbench commitprobe_sync for $FORHOWLONGSECS seconds..."
+su - $PGUSER -c "pgbench -n -c 1 -R 5 -r -P 1 -T $FORHOWLONGSECS -f /tmp/commitprobe_sync.pgb" \
+    > "$SAVEDIR/commitprobe_sync.log" 2>&1
+
+echo "pgbench run finished. Log file saved to $SAVEDIR/commitprobe_sync.log"
+
+
+LATENCYFILE="$SAVEDIR/latencies.txt"
+
+grep "^progress:" "$SAVEDIR/commitprobe_sync.log" | sed -n 's/.*lat \([0-9.]\+\) ms.*/\1/p' > "$LATENCYFILE"
+
+if [[ -s "$LATENCYFILE" ]]; then
+    awk '
+    BEGIN {
+      count = 0;
+      sum   = 0;
+      min   = 1000000;
+      max   = 0;
+    }
+    {
+      val = $1 + 0;
+      count++;
+      sum += val;
+      if (val < min) { min = val }
+      if (val > max) { max = val }
+    }
+    END {
+      if (count > 0) {
+        avg = sum / count;
+        printf "Total events: %d\n", count;
+        printf "Average latency: %.2f ms\n", avg;
+        printf "Minimum latency: %.2f ms\n", min;
+        printf "Maximum latency: %.2f ms\n", max;
+      } else {
+        print "No synchronous commit eventsfound.";
+      }
+    }' "$LATENCYFILE"
+else
+    echo "No synchronous commit events found."
+fi
+
+exit 0
